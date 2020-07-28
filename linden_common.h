@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <pthread.h>
-#include <gsl/gsl_rng.h>
+#include "gsl/rng/gsl_rng.h"
 #include "fraser.h"
 
 #if defined(__linux__)
