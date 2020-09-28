@@ -133,7 +133,7 @@ class rsl {
   typedef node_t<V, DATA_EXP, vector_sfra> data_t; //TODO: vector type is hardcoded here
 
   /// The threshold at which to merge chunks of the skipvector
-  const double merge_threshold = 2.0; //TODO: hardcoded
+  const double merge_threshold = 1.0; //TODO: hardcoded
 
   /// The number of index layers in the skipvector.
   ///
@@ -1307,7 +1307,8 @@ public:
         return result;
 
       } else { //Plan C: DH->next isn't orphan so extract min element to orphanize it
-      
+
+        //std::cout << "about to remove DH next min\n";
         const K key = next->v.first();
         bool result = remove(key, *v);
         HP::drop_all();

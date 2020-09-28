@@ -162,6 +162,7 @@ void* sssp(void *data) {
      } else if (d->lin) {
        node = (val_t) deletemin_key(d->linden_set, &dist_node, d); break;
      } else if (d->rsl) {
+       //printf("about to exmin\n");
        if(rsl_extract_min(d->rpq, &dist_node, &node)) {
          //printf("extracted a min %d %d\n", dist_node, node);
          break; // keep trying until get a node
@@ -185,7 +186,7 @@ void* sssp(void *data) {
       }
       continue;
     }
-    //fail = 0;
+    fail = 0;
     if (dist_node != nodes[node].dist) continue; // dead node
     nodes[node].times_processed++;
 
