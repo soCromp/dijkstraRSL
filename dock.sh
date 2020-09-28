@@ -18,4 +18,4 @@ echo "  On Windows, use dock.bat instead."
 #IMAGE=sv
 
 # Now that everything is configured, go ahead and launch a container
-docker run --privileged -v /Users/snc/Box\ Sync/Skola/Lehigh/SprayList:/root --rm -it sl
+docker run --privileged -v /Users/snc/Documents/Lehigh/dijkstra:/root --rm -it sv

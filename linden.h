@@ -2,6 +2,7 @@
 #define PRIOQ_H
 
 #include "linden_common.h"
+#include "rsl_c.h"
 
 typedef unsigned long pkey_t;
 typedef unsigned long pval_t;
@@ -72,6 +73,11 @@ typedef ALIGNED(64) struct thread_data {
   /* LINDEN */
   int lin;
   pq_t *linden_set;
+
+  /* RSL */
+  int rsl;
+  rsl_t *rpq;
+  int rpqInserts;
 } thread_data_t;
 
 

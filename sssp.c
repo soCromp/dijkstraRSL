@@ -12,6 +12,7 @@
 #include "math.h"
 #include "linden.h"
 //#include "gc/ptst.h"
+#include "rsl_c.h"
 
 //#define STATIC
 #define MAX_DEPS 10
@@ -152,7 +153,7 @@ void* sssp(void *data) {
   while (1) {
     val_t node;
     slkey_t dist_node;
-  //   print_skiplist(d->set);
+     //print_skiplist(d->set);
     while (1) { 
      if (d->sl) {
        if (spray_delete_min_key(d->set, &dist_node, &node, d)) break; // keep trying until get a node
@@ -160,23 +161,31 @@ void* sssp(void *data) {
        if (lotan_shavit_delete_min_key(d->set, &dist_node, &node, d)) break;
      } else if (d->lin) {
        node = (val_t) deletemin_key(d->linden_set, &dist_node, d); break;
+     } else if (d->rsl) {
+       if(rsl_extract_min(d->rpq, &dist_node, &node)) {
+         //printf("extracted a min %d %d\n", dist_node, node);
+         break; // keep trying until get a node
+       }
+       //printf("trying again...\n");
      } else {
-       printf("error: no queue selected\n");
+       //printf("error: no queue selected\n");
        exit(1);
      }
-     if (dist_node == -1) { // flag that list is empty
+     if ((int) dist_node == -1) { // flag that list is empty
+       //printf("dist node is -1\n");
        break;
      }
      dist_node = 0;
     }
-    if (dist_node == -1) { // list is empty; TODO make sure threads don't quit early
+    if ((int) dist_node == -1) { // list is empty; TODO make sure threads don't quit early
+      //printf("dist node is -1\n");
       fail++;
       if (fail > 20*d->nb_threads) { // TODO: really need a better break condition...
         break;
       }
       continue;
     }
-    fail = 0;
+    //fail = 0;
     if (dist_node != nodes[node].dist) continue; // dead node
     nodes[node].times_processed++;
 
@@ -192,10 +201,15 @@ void* sssp(void *data) {
         int res = ATOMIC_CAS_MB(&nodes[v].dist, dist_v, dist_node+w);
   //       printf("%d nodes[%d].dist=%d\n", res, v, nodes[v].dist);
         if (res) {
+            //printf("inserting %d %d...\n", dist_node+w, v);
           if (d->pq || d->sl) {
             sl_add_val(d->set, dist_node+w, v, TRANSACTIONAL); // add to queue only if CAS is successful
           } else if (d->lin) {
             insert(d->linden_set, dist_node+w, v);
+          } else if (d->rsl) {
+            //printf("inserting %d %d...\n", dist_node+w, v);
+            rsl_insert(d->rpq, dist_node+w, v, (d->id)+(d->nb_threads)*(d->rpqInserts));
+            d->rpqInserts++;
           }
           d->nb_add++;
   //         if (dist_node+1 > radius) {
@@ -271,8 +285,10 @@ int main(int argc, char **argv)
     {NULL, 0, NULL, 0}
   };
 
+  //Initialize the different PQs
   sl_intset_t *set;
   pq_t *linden_set;
+  rsl_t *rpq;
   int i, c, size, edges;
   unsigned long reads, effreads, updates, collisions, effupds, 
                 add, added, remove, removed;
@@ -286,6 +302,7 @@ int main(int argc, char **argv)
   int pq = DEFAULT_PQ;
   int sl = DEFAULT_SL;
   int lin = DEFAULT_LIN;
+  int rsl = DEFAULT_RSL;
   char *input = "";
   char *output = "";
   int src = 0;
@@ -295,7 +312,7 @@ int main(int argc, char **argv)
 
   while(1) {
     i = 0;
-    c = getopt_long(argc, argv, "hplLwbn:s:i:o:m:", long_options, &i);
+    c = getopt_long(argc, argv, "hplLrwbn:s:i:o:m:", long_options, &i);
 
     if(c == -1)
       break;
@@ -322,6 +339,8 @@ int main(int argc, char **argv)
             "        Remove via delete_min operations using a skip list\n"
             "  -L, --linden\n"
             "        Use Linden's priority queue\n"
+            "  -r, --rsl\n"
+            "        Use RSL priority queue\n"
             "  -n, --num-threads <int>\n"
             "        Number of threads (default=" XSTR(DEFAULT_NB_THREADS) ")\n"
             "  -s, --seed <int>\n"
@@ -346,6 +365,11 @@ int main(int argc, char **argv)
         break;
       case 'L':
         lin = 1;
+        break;
+      case 'r':
+        //printf("WELCOME!\n");
+        rsl = 1;
+        //exit(0);
         break;
       case 'w':
         weighted = 1;
@@ -389,6 +413,7 @@ int main(int argc, char **argv)
   printf("Priority Q   : %d\n", pq);
   printf("Spray List   : %d\n", sl);
   printf("Linden       : %d\n", lin);
+  printf("RSL          : %d\n", rsl);
   printf("Type sizes   : int=%d/long=%d/ptr=%d/word=%d\n",
       (int)sizeof(int),
       (int)sizeof(long),
@@ -494,6 +519,12 @@ int main(int argc, char **argv)
     nodes[src].dist = 1; // account for the fact that keys must be positive
   }
 
+  //RSL
+  if(rsl) {
+    rpq = rsl_create();
+    rsl_insert(rpq, 1, src, 0);
+    nodes[src].dist = 1;
+  }
 
   printf("Graph size   : %d\n", size);
   printf("Level max    : %d\n", *levelmax);
@@ -540,6 +571,13 @@ int main(int argc, char **argv)
       data[i].linden_set = linden_set;
     }
 
+    /* RSL */
+    data[i].rsl = rsl;
+    if(rsl) {
+      data[i].rpq = rpq;
+      data[i].rpqInserts = 0;
+    }
+
     if (pthread_create(&threads[i], &attr, sssp, (void *)(&data[i])) != 0) {
       fprintf(stderr, "Error creating thread\n");
       exit(1);
@@ -554,7 +592,6 @@ int main(int argc, char **argv)
     perror("signal");
     exit(1);
   }
-
 
 
   /* stop = 0; */
@@ -580,8 +617,14 @@ int main(int argc, char **argv)
   long unreachable = 0;
   if (strcmp(output,"")) {
     FILE *out = fopen(output, "w");
-    for (i = 0;i < size;i++) {
-      fprintf(out, "%d %lu\n", i, nodes[i].dist);
+    if(rsl) {
+      for (i = 0;i < size;i++) {
+        fprintf(out, "%d %lu\n", i, nodes[i].dist-1);
+      }
+    } else {
+      for (i = 0;i < size;i++) {
+        fprintf(out, "%d %lu\n", i, nodes[i].dist);
+      }
     }
     fclose(out);
   } else {

@@ -1,0 +1,57 @@
+# Let the programmer choose 32 or 64 bits, but default to 32
+BITS ?= 64
+
+# Directory names
+ODIR := ./obj$(BITS)
+output_folder := $(shell mkdir -p $(ODIR))
+
+# Names of files that the compiler generates
+EXEFILES  = $(patsubst %, $(ODIR)/%,   $(TARGETS))
+OFILES    = $(patsubst %, $(ODIR)/%.o, $(CXXFILES))
+EXEOFILES = $(patsubst %, $(ODIR)/%.o, $(TARGETS))
+DEPS      = $(patsubst %, $(ODIR)/%.d, $(CXXFILES) $(TARGETS))
+
+# Compiler and compiler-specific flags (CSFLAGS)
+CXX = g++-8
+#CXX = clang++
+
+ifeq ($(CXX),g++)
+  CSFLAGS = -fgnu-tm
+else
+  CSFLAGS =
+endif
+
+NOWARNFLAGS = -Wno-class-memaccess
+
+# NB: use += so that we can add additional flags in the files that include this
+CXXFLAGS += -mrtm -MMD -m$(BITS) -std=c++17 -Wall -Wextra $(CSFLAGS) $(NOWARNFLAGS) # General flags
+CXXFLAGS += -O0 -ggdb # Flags for debug
+#CXXFLAGS += -O3 -DNDEBUG # Flags for performance
+LDFLAGS += -m$(BITS) -pthread -lpthread $(CSFLAGS)
+
+# Build 'all' by default, and don't clobber intermediate files
+.DEFAULT_GOAL = all
+.PRECIOUS: $(OFILES) $(EXEOFILES)
+.PHONY: all clean
+
+# Goal is to build all executables
+all: $(EXEFILES)
+
+# Rules for building object files
+$(ODIR)/%.o: %.cc
+	@echo "[CXX] $< --> $@"
+	@$(CXX) $< -o $@ -c $(CXXFLAGS)
+
+# Rules for building executables... we assume an executable uses *all* of the 
+# OFILES
+$(ODIR)/%: $(ODIR)/%.o $(OFILES)
+	@echo "[LD] $< --> $@"
+	@$(CXX) $^ -o $@ $(LDFLAGS)
+
+# clean by clobbering the build folder
+clean:
+	@echo Cleaning up...
+	@rm -rf $(ODIR) $(DEPLOY) $(TURNIN)
+
+# Include any dependencies we generated previously
+-include $(DEPS)

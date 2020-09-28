@@ -8,12 +8,13 @@ ROOT = .
 SOLARIS_CC 	?= /opt/csw/bin/gcc
 TILERA_CC	?= tile-gcc
 CC ?= gcc
+CXX ?= clang++
 
 # Profile
 ifeq ($(VERSION),DEBUG)
-     CFLAGS	+= -g -DDEBUG -O0
+     CFLAGS	+= -Og -DDEBUG -Og
 else
-     CFLAGS	+= -O3 -DNDEBUG 
+     CFLAGS	+= -Og -DNDEBUG 
 endif
 
 BINDIR		?= $(ROOT)/bin
@@ -69,24 +70,28 @@ endif
 ifeq ($(ARCH_NAME), i386)
     ARCH = x86
     CFLAGS += -m32
+    CXFLAGS += -m32
     LDFLAGS += -m32
 endif
 
 ifeq ($(ARCH_NAME), i686)
     ARCH = x86
     CFLAGS += -m32
+    CXFLAGS += -m32
     LDFLAGS += -m32
 endif
 
 ifeq ($(ARCH_NAME), x86_64)
     ARCH = x86_64
     CFLAGS += -m64
+    CXFLAGS += -m64
     LDFLAGS += -m64
 endif
 
 ifeq ($(ARCH_NAME), sun4v)
     ARCH = sparc64
     CFLAGS += -DSPARC=1 -DINLINED=1 -m64
+    CXFLAGS += -m64
     LDFLAGS += -lrt -m64
 endif
 
@@ -106,6 +111,14 @@ CFLAGS += -Wall
 CFLAGS += -fno-strict-aliasing
 CFLAGS += -I$(LIBAO_INC) -I$(ROOT)/include
 
+CXFLAGS += -D_REENTRANT 
+CXFLAGS += -D_GNU_SOURCE
+CXFLAGS += -DLOCKFREE
+CXFLAGS += -Wall
+CXFLAGS += -fno-strict-aliasing
+CXFLAGS += -std=c++17 -Wextra -Wno-class-memaccess -g
+CXFLAGS += -I$(LIBAO_INC) -I$(ROOT)/include
+
 #LDFLAGS += -L$(LIBAO)/lib -latomic_ops 
 LDFLAGS += -lpthread -lrt -lm
 
@@ -118,6 +131,9 @@ BINS = $(BINDIR)/*
 .PHONY:	all clean
 
 all:	spray sssp
+
+rsl.o: include/rsl/* rsl.h rsl_c.h
+	$(CXX) $(CXFLAGS) -c -o $(BUILDIR)/rsl.o rsl.cc
 
 measurements.o:
 	$(CC) $(CFLAGS) -c -o $(BUILDIR)/measurements.o measurements.c
@@ -149,17 +165,19 @@ intset.o: skiplist.h fraser.h
 test.o: skiplist.h fraser.h intset.h
 	$(CC) $(CFLAGS) -c -o $(BUILDIR)/test.o test.c
 
-sssp.o: skiplist.h fraser.h intset.h
+sssp.o: skiplist.h fraser.h intset.h rsl_c.h
 	$(CC) $(CFLAGS) -c -o $(BUILDIR)/sssp.o sssp.c
 
 pqueue.o: skiplist.h intset.h
 	$(CC) $(CFLAGS) -c -o $(BUILDIR)/pqueue.o pqueue.c
 
 spray: measurements.o ssalloc.o skiplist.o fraser.o intset.o test.o pqueue.o linden.o linden_common.o gc.o ptst.o
-	$(CC) $(CFLAGS) $(BUILDIR)/pqueue.o $(BUILDIR)/measurements.o $(BUILDIR)/ssalloc.o $(BUILDIR)/skiplist.o $(BUILDIR)/fraser.o $(BUILDIR)/intset.o $(BUILDIR)/test.o $(BUILDIR)/linden.o $(BUILDIR)/linden_common.o $(BUILDIR)/ptst.o $(BUILDIR)/gc.o -o $(SPRAY) $(LDFLAGS)
+	#$(CXX) $(CXFLAGS) $(BUILDIR)/rsl.o -c -o $(BINDIR)/rsl $(LDFLAGS)
+	$(CXX) $(CFLAGS) $(BUILDIR)/pqueue.o $(BUILDIR)/measurements.o $(BUILDIR)/ssalloc.o $(BUILDIR)/skiplist.o $(BUILDIR)/fraser.o $(BUILDIR)/intset.o $(BUILDIR)/test.o $(BUILDIR)/linden.o $(BUILDIR)/linden_common.o $(BUILDIR)/ptst.o $(BUILDIR)/gc.o -o $(SPRAY) $(LDFLAGS)
 
-sssp: measurements.o ssalloc.o skiplist.o fraser.o intset.o sssp.o pqueue.o linden.o linden_common.o gc.o ptst.o
-	$(CC) $(CFLAGS) $(BUILDIR)/pqueue.o $(BUILDIR)/measurements.o $(BUILDIR)/ssalloc.o $(BUILDIR)/skiplist.o $(BUILDIR)/fraser.o $(BUILDIR)/intset.o $(BUILDIR)/sssp.o $(BUILDIR)/linden.o $(BUILDIR)/linden_common.o $(BUILDIR)/ptst.o $(BUILDIR)/gc.o -o $(SSSP) $(LDFLAGS)
+sssp: measurements.o ssalloc.o rsl.o skiplist.o fraser.o intset.o sssp.o pqueue.o linden.o linden_common.o gc.o ptst.o rsl_c.h
+	$(CXX) $(CFLAGS) $(BUILDIR)/rsl.o $(BUILDIR)/pqueue.o $(BUILDIR)/measurements.o $(BUILDIR)/ssalloc.o $(BUILDIR)/skiplist.o $(BUILDIR)/fraser.o $(BUILDIR)/intset.o $(BUILDIR)/sssp.o $(BUILDIR)/linden.o $(BUILDIR)/linden_common.o $(BUILDIR)/ptst.o $(BUILDIR)/gc.o -o $(SSSP) $(LDFLAGS)
+	#$(CXX) $(CXFLAGS) $(BUILDIR)/rsl.o -c -o $(BINDIR)/rsl $(LDFLAGS)
 
 clean:
 	-rm -f $(BINS) $(BUILDIR)/*.o
