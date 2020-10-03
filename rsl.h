@@ -1086,15 +1086,21 @@ public:
   bool extract_min(K *k, V *v) {
     init_context();
 
-    // We jump straight to the data layer and lock the head
-    data_head.lock.acquire();
+    HP::take_first(&data_head);
+    uint64_t dh_lock = data_head.lock.begin_read();
 
     // Plan A: DH holds data so extract from DH
     if (data_head.v.get_size() > 0) {
+      if (!data_head.lock.confirm_read(dh_lock) || !data_head.lock.try_upgrade(dh_lock)) {
+        HP::drop_all();
+        return false;
+      }
+
       // hard-coded for SFRA, where it's the min
       K rk = data_head.v.first();
       V rv;
       bool result = data_head.v.remove(rk, rv);
+      HP::drop_all();
       data_head.lock.release();
       if (!result)
         std::terminate(); // [mfs] sanity check
@@ -1105,9 +1111,9 @@ public:
 
     // Plan D: DH empty and next nullptr, so there's nothing
     else if (data_head.next == nullptr) {
+      HP::drop_all();
       *k = -1;
       *v = -1;
-      data_head.lock.release();
       return true;
     }
 
@@ -1118,10 +1124,11 @@ public:
     // Plan B_1: DH empty, DH->next is non-empty orphan... just extract from
     //           DH->next
     if (dhn->lock.is_orphan() && dhn->v.get_size() > 0) {
+      HP::drop_all();
       K rk = dhn->v.first();
       V rv;
       bool result = dhn->v.remove(rk, rv);
-      data_head.lock.release();
+      //data_head.lock.release();
       dhn->lock.release();
       if (!result)
         std::terminate(); // [mfs] sanity check
@@ -1133,7 +1140,8 @@ public:
     // Plan B_2: DH empty, DH->next is empty orphan... unstitch DHN and retry
     else if (dhn->lock.is_orphan() && dhn->v.get_size() == 0) {
       data_head.next = dhn->next.load();
-      data_head.lock.release();
+      //data_head.lock.release();
+      HP::drop_all();
       dhn->lock.release();
       HP::reclaim(dhn);
       return extract_min(k, v);
@@ -1144,7 +1152,8 @@ public:
       const K key = dhn->v.first();
       V rv;
       bool found = dhn->v.contains(key, rv);
-      data_head.lock.release();
+      //data_head.lock.release();
+      HP::drop_all();
       dhn->lock.release();
       if (!found)
         std::terminate(); // play it safe

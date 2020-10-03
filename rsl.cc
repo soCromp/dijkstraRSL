@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 #include "rsl_inc/hp_manager.h"
+#include "rsl_inc/hp_manager_leaky.h"
 #include "rsl_inc/vector_sfra.h"
 #include "rsl_inc/vector_ufra.h"
 
@@ -9,8 +10,8 @@
 extern "C" {
 typedef std::pair<const unsigned long, unsigned long> value_type;
 
-typedef skipvector<unsigned long, unsigned long, vector_ufra, vector_sfra, 3, 4,
-                   16, hp_manager<200>>
+typedef skipvector<unsigned long, unsigned long, vector_ufra, vector_sfra, 4, 3,
+                   16, hp_manager_leaky<200>>
     rsl_t;
 
 rsl_t *rsl_create() {
