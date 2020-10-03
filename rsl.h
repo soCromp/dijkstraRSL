@@ -5,18 +5,14 @@
 #include <cstddef>
 #include <functional>
 
-#include "../include/rsl/common/config.h"
-#include "../include/rsl/common/rlx_atomic.h"
-#include "../include/rsl/hp/hp_deletable.h"
-#include "../include/rsl/lock/sv_lock.h"
-#include "../include/rsl/rng/lehmer64.h"
-#include "../include/rsl/vector_sfra.h"
-#include "../include/rsl/hp/hp_manager.h"
-#include "../include/rsl/hp/hp_manager_leaky.h"
+#include "rsl_inc/hp_deletable.h"
+#include "rsl_inc/lehmer64.h"
+#include "rsl_inc/rlx_atomic.h"
+#include "rsl_inc/sv_lock.h"
 
-#include "rsl_c.h"
-
-#include <iostream>
+/// [mfs] Tuning values... revisit?
+static const double CFG_MERGE_THRESHOLD = 1.0;
+static const uint32_t CFG_LAYERS = 3; // probably 3 is better
 
 /// This class is the default implementation of the skip vector. It supports
 /// foreach and range operations using lazy two-phase locking for concurrency
@@ -32,22 +28,15 @@
 ///   V            - The type of the value for k/v pairs
 ///   DATA_VECTOR  - A vector type that can hold k/v pairs for the data layer
 ///   INDEX_VECTOR - A vector type that can hold k/v pairs for the index layer
-///   DATA_EXP     - The log_2 of the target chunk size for data layer vectors - 5
-///   INDEX_EXP    - The log_2 of the target chunk size for index layer vectors - 5
-///   LAYERS       - The number of index layers - 32
+///   DATA_EXP     - The log_2 of the target chunk size for data layer vectors
+///   INDEX_EXP    - The log_2 of the target chunk size for index layer vectors
+///   LAYERS       - The number of index layers
 ///   HP           - The class responsible for managing hazard pointers.
-  //,
-//           template <typename, typename, int> typename DATA_VECTOR,
-//           template <typename, typename, int> typename INDEX_VECTOR,
-//           int DATA_EXP, int INDEX_EXP, int LAYERS, typename HP>
-class rsl {
-
-  const static int INDEX_EXP = 5;
-  const static int DATA_EXP = 5;
-  const static int LAYERS = 32;
-  typedef slkey_t K;
-  typedef slkey_t V;
-  typedef hp_manager<200> HP;
+template <typename K, typename V,
+          template <typename, typename, int> typename DATA_VECTOR,
+          template <typename, typename, int> typename INDEX_VECTOR,
+          int DATA_EXP, int INDEX_EXP, int LAYERS, typename HP>
+class skipvector {
 
   /// node_t is used for both the data layer and the index layer(s)
   template <typename T, int EXP,
@@ -69,7 +58,7 @@ class rsl {
     }
 
     /// A vector of key/value pairs.
-    VECTOR<K, T, 32> v; //TODO: hardcoded chunk size to 32. used to be get_vector_size()
+    VECTOR<K, T, get_vector_size()> v;
 
     /// Pointer to next vector at this layer.
     rlx_atomic<node_t *> next = nullptr;
@@ -125,38 +114,27 @@ class rsl {
   /// type of index nodes.  Since an index node can reference either another
   /// index node, or a data node, we use a generic void*.  Thus the map holds
   /// K/ptr pairs
-  
-
-  typedef node_t<void *, INDEX_EXP, vector_sfra> index_t; //TODO: vector type is hardcoded here
+  typedef node_t<void *, INDEX_EXP, INDEX_VECTOR> index_t;
 
   /// type of data nodes.  A data node's vector holds k/v pairs
-  typedef node_t<V, DATA_EXP, vector_sfra> data_t; //TODO: vector type is hardcoded here
+  typedef node_t<V, DATA_EXP, DATA_VECTOR> data_t;
 
   /// The threshold at which to merge chunks of the skipvector
-  const double merge_threshold = 1.0; //TODO: hardcoded
+  const double merge_threshold;
 
   /// The number of index layers in the skipvector.
   ///
   /// NB: This does not include the data layer
-  const int layers = 32; //TODO: hardcoded
+  const int layers;
 
   /// Array of leftmost index nodes.
   index_t index_head[LAYERS];
 
   /// Leftmost data vector.
-  data_t dh;
-  data_t *data_head;
+  data_t data_head;
 
   /// Create a context for the thread, if one doesn't exist
   void init_context() { HP::init_context(); }
-
-  /// Minchunk
-  data_t minchunk;
-  int64_t minchunk_size = 1; //size of minchunk
-
-  int64_t get_minchunk_nextind() { //get the slot in minchunk vector from which to exmin
-    return --minchunk_size;
-  }
 
   /// Generate height using a geometric distribution from 0 to layers.
   /// A height of n means it exists in the bottommost n index layers, and also
@@ -400,7 +378,9 @@ class rsl {
 
     // read-lock new_node, then check curr hasn't changed
     //
-    // [mfs]: double-check on curr may be redundant?
+    // NB: This double-check is necessary. It is possible that new_node's
+    // minimum element will be removed in the mean time, and then reinserted at
+    // a lower height.
     uint64_t new_lock = new_node->lock.begin_read();
     if (!curr->lock.confirm_read(curr_lock)) {
       HP::drop_next();
@@ -459,7 +439,7 @@ class rsl {
     }
 
     // Skip through the last index layer.
-    data_t *curr_dl = data_head;
+    data_t *curr_dl = &data_head;
     if (!follow<data_t>(curr, curr_lock, k, curr_dl)) {
       // Sequence lock check failed
       HP::drop_all();
@@ -486,28 +466,18 @@ public:
   typedef std::pair<const K, V> value_type;
 
   /// Benchmark constructor
-  rsl(config *cfg)
-      : merge_threshold(cfg->merge_threshold), layers(cfg->layers) {
+  skipvector() : merge_threshold(CFG_MERGE_THRESHOLD), layers(CFG_LAYERS) {
 
     // Make sure number of layers is valid.
     assert(layers > 0 && layers <= LAYERS);
 
     // We use a single 64-bit random number on insert(), so make sure that's
     // enough for the chosen configuration.
-    assert(DATA_EXP + (cfg->layers * INDEX_EXP) <= 64);
-
-    data_head = &dh;
-  }
-
-
-  //other constructor
-  rsl() {
-
-    data_head = &dh;
+    assert(DATA_EXP + (CFG_LAYERS * INDEX_EXP) <= 64);
   }
 
   /// Sequential-only destructor
-  ~rsl() {
+  ~skipvector() {
     // First, free all index layer nodes BUT the leftmost ones.
     for (int i = 0; i < layers; ++i) {
       index_t *curr = index_head[i].next;
@@ -520,7 +490,7 @@ public:
 
     // Free each node in data layer but the leftmost,
     // which was statically allocated
-    data_t *data_curr = data_head->next;
+    data_t *data_curr = data_head.next;
     while (data_curr != nullptr) {
       data_t *next = data_curr->next;
       delete data_curr;
@@ -564,7 +534,7 @@ public:
     }
 
     // Skip through the last index layer.
-    data_t *curr_dl = data_head;
+    data_t *curr_dl = &data_head;
     if (!follow<data_t>(curr, curr_lock, k, curr_dl)) {
       // Sequence lock check failed
       HP::drop_all();
@@ -621,7 +591,7 @@ public:
     index_t *curr = &(index_head[layer]);
     HP::take_first(curr);
     uint64_t curr_lock = curr->lock.begin_read();
-    data_t *curr_dl = data_head;
+    data_t *curr_dl = &data_head;
 
     // checkpoint is a "safe node" that we know won't be deleted, because either
     // we hold the lock on its parent, or it is the head node of its layer.
@@ -703,7 +673,7 @@ public:
         if (layer > 0) {
           down_idx = &(index_head[layer - 1]);
         } else {
-          curr_dl = data_head;
+          curr_dl = &data_head;
         }
       }
 
@@ -854,7 +824,7 @@ public:
     // Start at the topmost index layer.
     int layer = layers - 1;
     index_t *curr = &(index_head[layer]);
-    data_t *curr_dl = data_head;
+    data_t *curr_dl = &data_head;
 
     // Skip through index layers.
     while (layer >= 0) {
@@ -887,7 +857,7 @@ public:
         if (layer > 0) {
           down_idx = &(index_head[layer - 1]);
         } else {
-          curr_dl = data_head;
+          curr_dl = &data_head;
         }
       }
 
@@ -972,7 +942,7 @@ public:
     index_t *curr = &(index_head[layer]);
     uint64_t curr_lock = curr->lock.begin_read();
     HP::take_first(curr);
-    data_t *curr_dl = data_head;
+    data_t *curr_dl = &data_head;
 
     // Skip through index layers.
     while (layer >= 0) {
@@ -1025,7 +995,7 @@ public:
         if (layer > 0) {
           down_idx = &(index_head[layer - 1]);
         } else {
-          curr_dl = data_head;
+          curr_dl = &data_head;
         }
       }
 
@@ -1081,7 +1051,6 @@ public:
       void *down_void = nullptr;
       curr->v.remove(k, down_void);
       index_t *down_idx = static_cast<index_t *>(down_void);
-      // TODO: See todo just above.
       down_idx->lock.acquire();
 
       // Release first node normally, subsequent nodes as orphans.
@@ -1098,7 +1067,6 @@ public:
     void *down_void = nullptr;
     curr->v.remove(k, down_void);
     curr_dl = static_cast<data_t *>(down_void);
-    // TODO: See todo just above.
     curr_dl->lock.acquire();
     if (layer == 0) {
       curr->lock.release();
@@ -1114,226 +1082,87 @@ public:
     return true;
   }
 
-  /// Remove an element from the map, put its value into v
-  bool remove(const K &k, V &v) {
+  // sequential method of extract min. puts extracted min into k and v args
+  bool extract_min(K *k, V *v) {
     init_context();
 
-    // First, search for the uppermost instance of k in the data structure.
-    // Clean up after other lazy removes along the way.
+    // We jump straight to the data layer and lock the head
+    data_head.lock.acquire();
 
-  top:
-
-    // Start at the topmost index layer.
-    int layer = layers - 1;
-    index_t *curr = &(index_head[layer]);
-    uint64_t curr_lock = curr->lock.begin_read();
-    HP::take_first(curr);
-    data_t *curr_dl = data_head;
-
-    // Skip through index layers.
-    while (layer >= 0) {
-      // Check next, as it may need to be maintained or followed.
-      if (!check_next<index_t>(curr, curr_lock, k, true)) {
-        HP::drop_all();
-        goto top;
-      }
-
-      // Now, search the vector we arrived at for the right down pointer.
-      void *down = nullptr;
-      index_t *down_idx = nullptr;
-      K found_k = k;
-
-      if (curr->v.find_lte(k, found_k, down)) {
-        if (found_k == k) {
-          // If we find the uppermost instance of k in the skipvector, then lock
-          // it and proceed to remove it.
-
-          // NB: Here we must confirm that this is the uppermost instance of k.
-          // If curr is not an orphan, and k is the first element in this list,
-          // then this is NOT the uppermost instance of k, so start over.
-          // Otherwise, it is safe to proceed. This can happen if this remove()
-          // call interleaves with an insert() call on the same k.
-          if (!sv_lock::is_orphan(curr_lock) && curr->v.first() == k) {
-            HP::drop_all();
-            goto top;
-          }
-
-          if (!curr->lock.try_upgrade(curr_lock)) {
-            HP::drop_all();
-            goto top;
-          }
-
-          // We have a write lock on curr now, so we don't need the hazard
-          // pointer anymore.
-          HP::drop_curr();
-          break;
-        }
-
-        // Otherwise, we found an appropriate down pointer, so follow it.
-        if (layer > 0) {
-          down_idx = static_cast<index_t *>(down);
-        } else {
-          curr_dl = static_cast<data_t *>(down);
-        }
-      } else {
-        // No appropriate down pointer was found,
-        // so start at the leftmost node at the next layer.
-        if (layer > 0) {
-          down_idx = &(index_head[layer - 1]);
-        } else {
-          curr_dl = data_head;
-        }
-      }
-
-      // Exchange curr's lock for down's lock.
-      if (layer > 0) {
-        if (!reader_swap<index_t>(curr, curr_lock, down_idx)) {
-          HP::drop_all();
-          goto top;
-        }
-        curr = down_idx;
-      } else {
-        if (!reader_swap<data_t>(curr, curr_lock, curr_dl)) {
-          HP::drop_all();
-          goto top;
-        }
-      }
-
-      --layer;
-    }
-
-    // Normal case: k wasn't found in upper levels, so check data layer.
-    if (layer == -1) {
-      // Check if we have to follow any next pointers.
-      bool check_next_success = check_next<data_t>(curr_dl, curr_lock, k, true);
-
-      // Now, acquire curr_dl as a writer.
-      if (!check_next_success || !curr_dl->lock.try_upgrade(curr_lock)) {
-        HP::drop_all();
-        goto top;
-      }
-
-      // Edge case: Same as above; this may not be the uppermost instance of k,
-      // if this call interleaves with an insert() call on k.
-      // Double-check that it is.
-      if (!sv_lock::is_orphan(curr_lock) && curr_dl->v.first() == k) {
-        curr_dl->lock.release_unchanged();
-        goto top;
-      }
-
-      // At this point, simply try to remove from the data node we arrived at.
-      bool result = curr_dl->v.remove(k, v);
-      curr_dl->lock.release_changed_if(result);
-      HP::drop_all();
+    // Plan A: DH holds data so extract from DH
+    if (data_head.v.get_size() > 0) {
+      // hard-coded for SFRA, where it's the min
+      K rk = data_head.v.first();
+      V rv;
+      bool result = data_head.v.remove(rk, rv);
+      data_head.lock.release();
+      if (!result)
+        std::terminate(); // [mfs] sanity check
+      *k = rk;
+      *v = rv;
       return result;
     }
 
-    // remove() starts being lazy here.
-    // We broke out of loop early, so lock all the way down.
-    // NB: For each new node we access here, we have its parent locked as a
-    // writer, so there is no need to take a hazard pointer on them.
-
-    for (int i = layer; i > 0; --i) {
-      void *down_void = nullptr;
-      curr->v.remove(k, down_void);
-      index_t *down_idx = static_cast<index_t *>(down_void);
-      // TODO: See todo just above.
-      down_idx->lock.acquire();
-
-      // Release first node normally, subsequent nodes as orphans.
-      if (i == layer) {
-        curr->lock.release();
-      } else {
-        curr->lock.release_as_orphan();
-      }
-
-      curr = down_idx;
-    }
-
-    // And do it once more for the last index layer.
-    void *down_void = nullptr;
-    curr->v.remove(k, down_void);
-    curr_dl = static_cast<data_t *>(down_void);
-    // TODO: See todo just above.
-    curr_dl->lock.acquire();
-    if (layer == 0) {
-      curr->lock.release();
-    } else {
-      curr->lock.release_as_orphan();
-    }
-
-    // Finally, remove the element from the data layer.
-    curr_dl->v.remove(k, v);
-    curr_dl->lock.release_as_orphan();
-
-    HP::drop_all();
-    return true;
-  }
-
-  //sequential method of extract min. puts extracted min into k and v args
-  bool extract_min(K *k, V *v) {
-    data_head->lock.acquire();
-
-    //Plan A: DH holds data so extract from DH
-    if(data_head->v.get_size() > 0) {
-
-      bool result = data_head->v.remove_pair_at(data_head->v.get_size()-1, *k, *v); // could also try extracting from index 0
-      data_head->lock.release();
-      return result;
-
-    } else if(data_head->next != nullptr) {//DH is empty, so see what DH->next is doing
-
-      data_t *next = data_head->next;
-      HP::take(next);
-      uint64_t next_lock = next->lock.begin_read();
-      if (!next->lock.confirm_read(next_lock)) { //see if successfully acquired read lock
-        HP::drop_next();
-        data_head->lock.release();
-        return false;
-      }
-
-      if(next->lock.is_orphan()) { //Plan B: DH empty, DH->next is orphan. Make DH->next new head, extract from it
-
-        data_t *old_head = data_head;
-        data_head = next; //get rid of old, empty head
-        //TO DO: stop leaking empty heads
-        old_head->lock.release();
-        if(!data_head->lock.try_upgrade(next_lock)) {
-          HP::drop_next();
-          return false;
-        }
-        bool result = data_head->v.remove_pair_at(data_head->v.get_size()-1, *k, *v); 
-        data_head->lock.release();
-        return result;
-
-      } else { //Plan C: DH->next isn't orphan so extract min element to orphanize it
-
-        //std::cout << "about to remove DH next min\n";
-        const K key = next->v.first();
-        bool result = remove(key, *v);
-        HP::drop_all();
-        data_head->lock.release();
-        return result;
-      
-      }
-      
-    } else {
+    // Plan D: DH empty and next nullptr, so there's nothing
+    else if (data_head.next == nullptr) {
       *k = -1;
       *v = -1;
-      data_head->lock.release();
+      data_head.lock.release();
       return true;
     }
 
-    
-    
-    data_head->lock.release();
-    return false;
+    // Just to play it safe, let's lock DH->next and release data_head...
+    data_t *dhn = data_head.next;
+    dhn->lock.acquire();
+
+    // Plan B_1: DH empty, DH->next is non-empty orphan... just extract from
+    //           DH->next
+    if (dhn->lock.is_orphan() && dhn->v.get_size() > 0) {
+      K rk = dhn->v.first();
+      V rv;
+      bool result = dhn->v.remove(rk, rv);
+      data_head.lock.release();
+      dhn->lock.release();
+      if (!result)
+        std::terminate(); // [mfs] sanity check
+      *k = rk;
+      *v = rv;
+      return result;
+    }
+
+    // Plan B_2: DH empty, DH->next is empty orphan... unstitch DHN and retry
+    else if (dhn->lock.is_orphan() && dhn->v.get_size() == 0) {
+      data_head.next = dhn->next.load();
+      data_head.lock.release();
+      dhn->lock.release();
+      HP::reclaim(dhn);
+      return extract_min(k, v);
+    }
+
+    // Plan C: DH->next isn't orphan so extract min element to orphanize it
+    else {
+      const K key = dhn->v.first();
+      V rv;
+      bool found = dhn->v.contains(key, rv);
+      data_head.lock.release();
+      dhn->lock.release();
+      if (!found)
+        std::terminate(); // play it safe
+      bool result = remove(key);
+      if (result) {
+        *k = key;
+        *v = rv;
+        return true;
+      }
+      // [mfs-rsl] Check that result always is true for single-thread
+      return extract_min(k, v);
+    }
   }
 
   /// foreach() applies an elemental function f() to each element in the map.
   /// This implementation is linearizable.
   void foreach (std::function<void(const K &, V &, bool &)> f, bool) {
-    data_t *curr = data_head;
+    data_t *curr = &data_head;
     bool exit_flag = false;
 
     // Acquiring locks and traversing
@@ -1345,7 +1174,7 @@ public:
 
     // Lock-releasing phase
     data_t *last = curr;
-    curr = data_head;
+    curr = &data_head;
     while (curr != last) {
       data_t *next = curr->next;
       curr->lock.release();
@@ -1405,10 +1234,10 @@ public:
     }
 
     // Verify the last index layer against the data layer.
-    verify_index<data_t>(0, data_head);
+    verify_index<data_t>(0, &data_head);
 
     // Verify the data layer.
-    data_t *curr = data_head;
+    data_t *curr = &data_head;
 
     while (curr != nullptr) {
       int curr_size = curr->v.get_size();
@@ -1465,7 +1294,7 @@ public:
   // SEQUENTIAL-ONLY size function
   size_t get_size() {
     size_t result = 0;
-    data_t *curr = data_head;
+    data_t *curr = &data_head;
 
     while (curr != nullptr) {
       result += curr->v.get_size();
@@ -1501,7 +1330,7 @@ public:
 
     size_t count = 0;
     size_t elements = 0;
-    data_t *curr = data_head;
+    data_t *curr = &data_head;
     while (curr != nullptr) {
       elements += curr->v.get_size();
       ++count;
@@ -1528,7 +1357,7 @@ public:
     }
 
     std::cout << "Data: ";
-    data_t *curr = data_head;
+    data_t *curr = &data_head;
     while (curr != nullptr) {
       curr->lock.dump();
       curr->v.dump();
