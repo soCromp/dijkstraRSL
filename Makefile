@@ -12,9 +12,9 @@ CXX ?= clang++
 
 # Profile
 ifeq ($(VERSION),DEBUG)
-     CFLAGS	+= -Og -DDEBUG -Og
+     CFLAGS	+= -g -DDEBUG -O0
 else
-     CFLAGS	+= -Og -DNDEBUG 
+     CFLAGS	+= -O3 -DNDEBUG 
 endif
 
 BINDIR		?= $(ROOT)/bin
